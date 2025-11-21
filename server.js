@@ -213,12 +213,14 @@ if(process.env.JEST_WORKER_ID){
         const parts = raw.split('<!-- Plain Text Version -->');
         const htmlPart = parts[0] || raw;
         const textPart = parts[1] ? parts[1].replace(/^[\s\S]*?Subject:[^\n]*\n?/,'').trim() : '';
-        return { ...j, htmlBody: htmlPart, textBody: textPart };
+        return { ...j, htmlBody: htmlPart, textBody: textPart, upgraded: true };
       }
       return j;
     });
-    const annotated = jobs.map(j=>({ id:j.id, to:j.to, template:j.template, htmlLen: (j.htmlBody||'').length, textLen:(j.textBody||'').length, upgraded:j.upgraded }));
-    res.json({ jobs, summary:{ total: jobs.length, upgraded: jobs.filter(j=>j.upgraded).length, lengths: annotated } });
+    const annotated = jobs.map(j=>({ id:j.id, to:j.to, template:j.template, htmlLen: (j.htmlBody||'').length, textLen:(j.textBody||'').length, upgraded: !!j.upgraded }));
+    const summary = { total: jobs.length, upgraded: jobs.filter(j=>j.upgraded).length, lengths: annotated };
+    logger.info({ emailJobsSummary: summary }, 'Email jobs list summary');
+    res.json({ jobs, summary });
   });
 }
 
