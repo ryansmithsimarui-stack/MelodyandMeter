@@ -107,21 +107,26 @@ function createTransport(){
 }
 const mailer = createTransport();
 
+// --- Embedded critical email templates (fallback) ---
+const embeddedTemplates = {
+  'invite-trial-followup-email.html': `<!DOCTYPE html><html><body><h1>Next Steps After Your Trial</h1><p>Hi {{parent_first_name}}, thanks for bringing {{student_first_name}} for a trial lesson at Melody & Meter.</p><p><a href="{{portal_register_link}}">Activate Parent Portal & Enroll</a></p></body></html><!-- Plain Text Version -->Subject: Your Melody & Meter Trial — Secure a Weekly Slot\nHi {{parent_first_name}}, thanks for bringing {{student_first_name}} for a trial.\nActivate & Enroll: {{portal_register_link}}`,
+  'payment-receipt-email.html': `<!DOCTYPE html><html><body><p>Receipt {{invoice_number}} amount {{amount_formatted}} date {{payment_date}}</p></body></html><!-- Plain Text Version -->Subject: Payment Receipt\nReceipt {{invoice_number}} {{amount_formatted}} {{payment_date}}`,
+  'payment-failed-email.html': `<!DOCTYPE html><html><body><p>Payment failed {{invoice_number}} due {{amount_due_formatted}}</p></body></html><!-- Plain Text Version -->Subject: Payment Issue\nPayment failed {{invoice_number}} amount due {{amount_due_formatted}}`,
+  'verification-email.html': `<!DOCTYPE html><html><body><p>Verify email {{parent_first_name}} link {{verification_link}}</p></body></html><!-- Plain Text Version -->Subject: Verify Your Email\nVerify {{verification_link}}`
+};
+
 function loadTemplate(filename){
-  // Primary expected location: design/emails/<file>
-  const primary = path.join(__dirname,'..','..','emails',filename);
-  // Fallback (in case templates are moved inside project later): design/backend/node-express-stripe/emails/<file>
-  const fallback = path.join(__dirname,'emails',filename);
-  for(const attempt of [primary, fallback]){
-    try{
-      if(fs.existsSync(attempt)){
-        return fs.readFileSync(attempt,'utf8');
-      }
-    }catch(e){ /* continue to next attempt */ }
+  // Attempt filesystem first (project-local copy preferred)
+  const local = path.join(__dirname,'emails',filename);
+  const upstream = path.join(__dirname,'..','..','emails',filename);
+  for(const attempt of [local, upstream]){
+    try{ if(fs.existsSync(attempt)) return fs.readFileSync(attempt,'utf8'); }catch(e){ /* ignore */ }
   }
-  const diag = { filename, tried:[primary, fallback], cwd: process.cwd(), dirname: __dirname };
-  console.error('Template load failed', diag);
-  // Provide a non-empty fallback so tests relying on minimal length don't fail purely due to path issues.
+  if(embeddedTemplates[filename]){
+    logger.warn({ filename }, 'Using embedded template fallback');
+    return embeddedTemplates[filename];
+  }
+  logger.error({ filename, local, upstream }, 'Template not found, returning minimal placeholder');
   return `<!DOCTYPE html><html><body><p>Missing template placeholder for ${filename}</p></body></html><!-- Plain Text Version -->Subject: Placeholder Email\nMissing template placeholder.`;
 }
 function applyVars(tpl, vars){
