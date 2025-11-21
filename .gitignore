@@ -3,7 +3,9 @@ node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-package-lock.json
+# Allow lock file for reproducible installs & CI caching
+# (remove ignore so it can be committed)
+# package-lock.json
 
 # Env
 .env
