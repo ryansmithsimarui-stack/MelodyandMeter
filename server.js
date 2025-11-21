@@ -206,6 +206,15 @@ async function sendTemplate(to, subject, filename, vars){
   if(!text || text.trim().length === 0){
     text = `Template not found or empty: ${filename}`;
   }
+  const diag = {
+    template: filename,
+    rawLen: raw.length,
+    htmlPartLen: (htmlPart||'').length,
+    textPartPresent: !!textPart,
+    finalHtmlLen: html.length,
+    finalTextLen: text.length
+  };
+  logger.info(diag, 'Template processed');
   const emailData = { from: process.env.MAIL_FROM||'no-reply@melodyandmeter.com', to, subject, html, text };
   const alwaysQueue = process.env.ALWAYS_QUEUE_EMAIL === 'true';
   if((process.env.NODE_ENV === 'test' && !alwaysQueue) || process.env.INLINE_EMAIL_SEND === 'true'){
