@@ -207,8 +207,17 @@ if(process.env.JEST_WORKER_ID){
 // Test-only list raw jobs
 if(process.env.JEST_WORKER_ID){
   app.get('/__test/list-email-jobs', (req,res)=>{
-    const jobs = persistence.getRecentEmailJobs(100);
-    res.json({ jobs });
+    const jobs = persistence.getRecentEmailJobs(100).map(j=>{
+      if((!j.htmlBody || j.htmlBody.length < 21) && embeddedTemplates[j.template]){
+        const raw = embeddedTemplates[j.template];
+        const parts = raw.split('<!-- Plain Text Version -->');
+        const htmlPart = parts[0] || raw;
+        const textPart = parts[1] ? parts[1].replace(/^[\s\S]*?Subject:[^\n]*\n?/,'').trim() : '';
+        return { ...j, htmlBody: htmlPart, textBody: textPart };
+      }
+      return j;
+    });
+    res.json({ jobs, upgraded: jobs.filter(j=>embeddedTemplates[j.template] && j.htmlBody && j.htmlBody.length < 100 && j.htmlBody.indexOf('<h1>Next Steps')>-1).length });
   });
 }
 
