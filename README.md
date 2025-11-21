@@ -1,4 +1,5 @@
 # MelodyandMeter
+[![CI](https://github.com/ryansmithsimarui-stack/MelodyandMeter/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ryansmithsimarui-stack/MelodyandMeter/actions/workflows/ci.yml)
 website and startup details for Melody and Meter Music Studio
 
 ---
@@ -123,4 +124,49 @@ Alerting & Prometheus Examples:
 Operational Notes:
 - When `ALLOWED_RESOURCE_IDS` is set, metrics emit a zero sample for each allowed resource ensuring stable time series even before first booking.
 - Without enforcement, only observed resources plus a `primary` fallback (0) are emitted; plan dashboards accordingly before enabling allowlist.
+
+## CI & Automation
+
+- CI: GitHub Actions runs tests on Node 18.x and 20.x for pushes and PRs to `main`.
+  - Workflow: `.github/workflows/ci.yml`
+  - Steps: `npm install` then `node run-tests.js` (no audit/fund), npm cache enabled.
+- CodeQL: Static analysis on push/PR to `main` and weekly schedule.
+  - Workflow: `.github/workflows/codeql.yml`
+  - Results: GitHub Security tab → Code scanning alerts.
+- Dependabot: Weekly dependency PRs for npm with `dependencies` label.
+  - Config: `.github/dependabot.yml`
+  - Tip: Mark CI as a required status check so Dependabot PRs only merge when green.
+
+## Prometheus Scrape Example
+
+Add this to your Prometheus config and adjust the target to your service address:
+
+```yaml
+scrape_configs:
+  - job_name: 'melodyandmeter'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['localhost:4242']
+    metrics_path: /api/admin/metrics
+    scheme: http
+    relabel_configs: []
+```
+
+## Grafana Alerts (How-To)
+
+1) Import the dashboard: Dashboards → New → Import → upload `dashboards/bookings.json`.
+2) Create alert rules (Grafana 9+): Alerting → Alert rules → New alert rule.
+   - Set the data source to Prometheus and paste one of the expressions below.
+   - Choose evaluation interval (e.g., 1m) and a reasonable “for” duration to avoid flapping.
+   - Assign contact point (email/Slack/etc.).
+
+Example alert expressions:
+- Late cancellations spike (1h): `increase(melody_bookings_cancelled_late_total[1h]) > 5`
+- Sustained high utilization (>90% for 6h) on piano: `avg_over_time(melody_bookings_utilization_percent{resource_id="piano"}[6h]) > 0.9`
+- Duration P90 above 60 minutes (24h window): `histogram_quantile(0.9, sum by (le)(rate(melody_booking_duration_minutes_bucket[24h]))) > 60`
+- Reschedule ratio over 15% (7d): `increase(melody_reschedule_completed_total[7d]) / increase(melody_bookings_confirmed_total[7d]) > 0.15`
+
+Tips:
+- Use the resource allowlist to keep series cardinality stable and alerts predictable.
+- Start with wider “for” durations (e.g., 10–30m) to suppress brief spikes.
 
