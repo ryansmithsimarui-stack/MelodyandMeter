@@ -29,7 +29,9 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
-          cache-dependency-path: design/backend/node-express-stripe/package-lock.json
+          cache-dependency-path: |
+            design/backend/node-express-stripe/package-lock.json
+            **/package-lock.json
       - name: Install dependencies
         working-directory: design/backend/node-express-stripe
         run: npm install --no-audit --no-fund
