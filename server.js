@@ -195,9 +195,15 @@ if(process.env.JEST_WORKER_ID){
 async function sendTemplate(to, subject, filename, vars){
   const raw = loadTemplate(filename);
   const [htmlPart, textPart] = raw.split('<!-- Plain Text Version -->');
-  const html = applyVars(htmlPart||'', vars);
+  let html = applyVars(htmlPart||'', vars);
   let text = '';
   if(textPart){ text = applyVars(textPart.replace(/^[\s\S]*?Subject:[^\n]*\n?/,'').trim(), vars); }
+  if(!html || html.trim().length === 0){
+    html = `<!DOCTYPE html><html><body><p>Template not found or empty: ${filename}</p></body></html>`;
+  }
+  if(!text || text.trim().length === 0){
+    text = `Template not found or empty: ${filename}`;
+  }
   const emailData = { from: process.env.MAIL_FROM||'no-reply@melodyandmeter.com', to, subject, html, text };
   const alwaysQueue = process.env.ALWAYS_QUEUE_EMAIL === 'true';
   if((process.env.NODE_ENV === 'test' && !alwaysQueue) || process.env.INLINE_EMAIL_SEND === 'true'){
