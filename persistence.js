@@ -98,7 +98,11 @@ function addEmailJob(job){
     createdAt: now,
     updatedAt: now,
     // Optional meta for debugging
-    template: job.template || null
+    template: job.template || null,
+    codeVersion: job.codeVersion || null,
+    deterministicEnforced: job.deterministicEnforced || false,
+    htmlLenSnapshot: (job.htmlBody||'').length,
+    textLenSnapshot: (job.textBody||'').length
   };
   state.emailJobs.push(stored);
   commit();

@@ -162,8 +162,10 @@ function queueEmailPersisted({ to, subject, template, htmlBody, textBody }){
       textLen = textBody.length;
     }
   }
-  persistence.addEmailJob({ to, subject, template, htmlBody: htmlBody || '', textBody: textBody || '', maxAttempts: MAX_EMAIL_ATTEMPTS });
-  logger.info({ to:maskEmail(to), subject, htmlLen, textLen, template }, 'Email job queued');
+  const deterministicEnforced = template === 'invite-trial-followup-email.html';
+  const codeVersion = process.env.GITHUB_SHA || 'local';
+  persistence.addEmailJob({ to, subject, template, htmlBody: htmlBody || '', textBody: textBody || '', maxAttempts: MAX_EMAIL_ATTEMPTS, deterministicEnforced, codeVersion });
+  logger.info({ to:maskEmail(to), subject, htmlLen, textLen, template, deterministicEnforced, codeVersion }, 'Email job queued');
 }
 
 async function dispatchEmailJobs(){
@@ -217,7 +219,7 @@ if(process.env.JEST_WORKER_ID){
       }
       return j;
     });
-    const annotated = jobs.map(j=>({ id:j.id, to:j.to, template:j.template, htmlLen: (j.htmlBody||'').length, textLen:(j.textBody||'').length, upgraded: !!j.upgraded }));
+    const annotated = jobs.map(j=>({ id:j.id, to:j.to, template:j.template, htmlLen: (j.htmlBody||'').length, textLen:(j.textBody||'').length, upgraded: !!j.upgraded, deterministicEnforced: !!j.deterministicEnforced, codeVersion: j.codeVersion || null, snapshotHtmlLen: j.htmlLenSnapshot, snapshotTextLen: j.textLenSnapshot }));
     const summary = { total: jobs.length, upgraded: jobs.filter(j=>j.upgraded).length, lengths: annotated };
     logger.info({ emailJobsSummary: summary }, 'Email jobs list summary');
     res.json({ jobs, summary });
