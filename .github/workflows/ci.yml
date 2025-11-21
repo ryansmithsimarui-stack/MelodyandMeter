@@ -29,9 +29,18 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+          cache-dependency-path: design/backend/node-express-stripe/package-lock.json
+      - name: Generate lock file (if missing)
+        working-directory: design/backend/node-express-stripe
+        run: |
+          if [ ! -f package-lock.json ]; then
+            npm install --package-lock-only --no-audit --no-fund;
+          fi
       - name: Install dependencies
+        working-directory: design/backend/node-express-stripe
         run: npm install --no-audit --no-fund
       - name: Run tests
+        working-directory: design/backend/node-express-stripe
         run: node run-tests.js
       - name: Upload test logs on failure
         if: failure()
@@ -39,5 +48,5 @@ jobs:
         with:
           name: test-logs-${{ matrix.node }}
           path: |
-            ./
-            !node_modules/**
+            design/backend/node-express-stripe/
+            !design/backend/node-express-stripe/node_modules/**
