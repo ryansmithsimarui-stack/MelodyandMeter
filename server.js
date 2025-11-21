@@ -108,8 +108,19 @@ function createTransport(){
 const mailer = createTransport();
 
 function loadTemplate(filename){
-  const full = path.join(__dirname,'..','..','emails',filename);
-  try{ return fs.readFileSync(full,'utf8'); }catch(e){ console.error('Template load failed', filename, e.message); return ''; }
+  // Primary expected location: design/emails/<file>
+  const primary = path.join(__dirname,'..','..','emails',filename);
+  // Fallback (in case templates are moved inside project later): design/backend/node-express-stripe/emails/<file>
+  const fallback = path.join(__dirname,'emails',filename);
+  for(const attempt of [primary, fallback]){
+    try{
+      if(fs.existsSync(attempt)){
+        return fs.readFileSync(attempt,'utf8');
+      }
+    }catch(e){ /* continue to next attempt */ }
+  }
+  console.error('Template load failed', { filename, tried:[primary, fallback] });
+  return '';
 }
 function applyVars(tpl, vars){
   return Object.entries(vars).reduce((acc,[k,v])=>acc.replace(new RegExp('{{'+k+'}}','g'), v), tpl);
