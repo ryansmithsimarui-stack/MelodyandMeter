@@ -142,8 +142,10 @@ const SIMULATE_FAIL_ATTEMPTS = parseInt(process.env.SIMULATE_EMAIL_FAILURE_ATTEM
 const metrics = { emailSuccess:0, emailPermanentFailure:0 };
 
 function queueEmailPersisted({ to, subject, template, htmlBody, textBody }){
+  const htmlLen = (htmlBody||'').length;
+  const textLen = (textBody||'').length;
   persistence.addEmailJob({ to, subject, template, htmlBody: htmlBody || '', textBody: textBody || '', maxAttempts: MAX_EMAIL_ATTEMPTS });
-  logger.info({ to:maskEmail(to), subject }, 'Email job queued');
+  logger.info({ to:maskEmail(to), subject, htmlLen, textLen, template }, 'Email job queued');
 }
 
 async function dispatchEmailJobs(){
