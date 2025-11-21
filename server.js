@@ -217,7 +217,8 @@ if(process.env.JEST_WORKER_ID){
       }
       return j;
     });
-    res.json({ jobs, upgraded: jobs.filter(j=>embeddedTemplates[j.template] && j.htmlBody && j.htmlBody.length < 100 && j.htmlBody.indexOf('<h1>Next Steps')>-1).length });
+    const annotated = jobs.map(j=>({ id:j.id, to:j.to, template:j.template, htmlLen: (j.htmlBody||'').length, textLen:(j.textBody||'').length, upgraded:j.upgraded }));
+    res.json({ jobs, summary:{ total: jobs.length, upgraded: jobs.filter(j=>j.upgraded).length, lengths: annotated } });
   });
 }
 
