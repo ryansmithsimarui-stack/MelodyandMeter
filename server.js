@@ -141,8 +141,8 @@ const BASE_RETRY_DELAY_MS = parseInt(process.env.EMAIL_BASE_DELAY_MS||'2000',10)
 const SIMULATE_FAIL_ATTEMPTS = parseInt(process.env.SIMULATE_EMAIL_FAILURE_ATTEMPTS||'0',10);
 const metrics = { emailSuccess:0, emailPermanentFailure:0 };
 
-function queueEmailPersisted({ to, subject, template, html, text }){
-  persistence.addEmailJob({ to, subject, template, htmlBody: html, textBody: text, maxAttempts: MAX_EMAIL_ATTEMPTS });
+function queueEmailPersisted({ to, subject, template, htmlBody, textBody }){
+  persistence.addEmailJob({ to, subject, template, htmlBody: htmlBody || '', textBody: textBody || '', maxAttempts: MAX_EMAIL_ATTEMPTS });
   logger.info({ to:maskEmail(to), subject }, 'Email job queued');
 }
 
@@ -209,7 +209,7 @@ async function sendTemplate(to, subject, filename, vars){
   if((process.env.NODE_ENV === 'test' && !alwaysQueue) || process.env.INLINE_EMAIL_SEND === 'true'){
     await mailer.sendMail(emailData);
   }else{
-    queueEmailPersisted({ to, subject, template: filename, html, text });
+    queueEmailPersisted({ to, subject, template: filename, htmlBody: html, textBody: text });
   }
 }
 
