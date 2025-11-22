@@ -2,9 +2,13 @@
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
+      - ci/setup
   pull_request:
-    branches: [ main ]
+    branches:
+      - main
+      - ci/setup
 
 permissions:
   contents: read
@@ -29,15 +33,16 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+          cache-dependency-path: package-lock.json
       - name: Install dependencies
         run: npm install --no-audit --no-fund
       - name: Run tests
         run: node run-tests.js
-      - name: Upload test logs on failure
+      - name: Upload project (excluding node_modules) on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: test-logs-${{ matrix.node }}
           path: |
-            ./
+            .
             !node_modules/**
