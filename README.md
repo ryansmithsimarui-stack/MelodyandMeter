@@ -2,6 +2,8 @@
 [![CI](https://github.com/ryansmithsimarui-stack/MelodyandMeter/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ryansmithsimarui-stack/MelodyandMeter/actions/workflows/ci.yml)
 website and startup details for Melody and Meter Music Studio
 
+> CI Probe: commit added to trigger required status checks after enabling branch protection.
+
 ---
 
 Node/Express + Stripe example
