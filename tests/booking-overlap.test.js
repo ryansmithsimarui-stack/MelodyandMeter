@@ -23,4 +23,27 @@ describe('Booking overlap logic', () => {
     const sameTimeDifferentResource = persistence.isSlotAvailableWithDuration('slot1', b1.start_at, 30, null, 'secondary');
     expect(sameTimeDifferentResource).toBe(true);
   });
+  test('zero-duration both same start conflicts', () => {
+    const now = Date.now() + 100000; // new timestamp to avoid interference
+    persistence.createBooking('b2','user2','slotZ', now, 0, 'primary');
+    const conflict = persistence.isSlotAvailableWithDuration('slotZ', now, 0, null, 'primary');
+    expect(conflict).toBe(false);
+  });
+  test('zero-duration different start allowed', () => {
+    const b2 = persistence.getBooking('b2');
+    const later = b2.start_at + 60000; // +1 min
+    const allowed = persistence.isSlotAvailableWithDuration('slotZ', later, 0, null, 'primary');
+    expect(allowed).toBe(true);
+  });
+  test('zero-duration at start of existing non-zero booking allowed', () => {
+    const b1 = persistence.getBooking('b1');
+    const allowed = persistence.isSlotAvailableWithDuration('slot1', b1.start_at, 0, null, 'primary');
+    // With existing 30min booking starting now, zero-duration booking at same start should not overlap per logic
+    expect(allowed).toBe(true);
+  });
+  test('non-zero booking starting at end of zero-duration booking allowed', () => {
+    const b2 = persistence.getBooking('b2');
+    const allowed = persistence.isSlotAvailableWithDuration('slotZ', b2.start_at, 30, null, 'primary');
+    expect(allowed).toBe(true);
+  });
 });
