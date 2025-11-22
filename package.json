@@ -2,6 +2,9 @@
   "name": "mamp-backend-examples",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=18 <21"
+  },
   "scripts": {
     "start": "node server.js",
     "test": "node run-tests.js"
