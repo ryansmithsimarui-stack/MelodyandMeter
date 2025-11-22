@@ -4,7 +4,7 @@ const request = require('supertest');
 // Set env BEFORE requiring app
 process.env.NODE_ENV = 'test';
 process.env.STRIPE_WEBHOOK_SECRET = 'whsec_testsecret';
-process.env.BYPASS_STRIPE_SIGNATURE = 'true';
+process.env.STRIPE_SIGNATURE_TEST_MODE = 'true';
 process.env.STRIPE_SECRET_KEY = 'sk_test_dummy';
 process.env.ADMIN_API_KEY = 'adminkey';
 // Force queue mode off for this test (email sending inline ok)

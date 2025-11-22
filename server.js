@@ -331,7 +331,7 @@ app.post('/api/webhooks/stripe', bodyParser.raw({type:'application/json'}), asyn
   const sig = req.headers['stripe-signature'];
   let event;
   try{
-    if(process.env.NODE_ENV === 'test' && process.env.BYPASS_STRIPE_SIGNATURE === 'true'){
+    if(process.env.NODE_ENV === 'test' && process.env.STRIPE_SIGNATURE_TEST_MODE === 'true'){
       // Test-only bypass for signature complexity: use parsed object if already JSON-parsed.
       if(req.body instanceof Buffer){
         try{ event = JSON.parse(req.body.toString('utf8')); }catch(parseErr){ throw parseErr; }
