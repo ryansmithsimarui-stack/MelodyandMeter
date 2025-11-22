@@ -164,10 +164,6 @@ function queueEmailPersisted({ to, subject, template, htmlBody, textBody }){
   }
   persistence.addEmailJob({ to, subject, template, htmlBody: htmlBody || '', textBody: textBody || '', maxAttempts: MAX_EMAIL_ATTEMPTS });
   logger.info({ to:maskEmail(to), subject, htmlLen, textLen, template }, 'Email job queued');
-  const deterministicEnforced = template === 'invite-trial-followup-email.html';
-  const codeVersion = process.env.GITHUB_SHA || 'local';
-  persistence.addEmailJob({ to, subject, template, htmlBody: htmlBody || '', textBody: textBody || '', maxAttempts: MAX_EMAIL_ATTEMPTS, deterministicEnforced, codeVersion });
-  logger.info({ to:maskEmail(to), subject, htmlLen, textLen, template, deterministicEnforced, codeVersion }, 'Email job queued');
 }
 
 async function dispatchEmailJobs(){
