@@ -22,7 +22,7 @@
     "pino-http": "^8.5.1",
     "he": "^1.2.0",
     "ws": "^8.17.1",
-    "bullmq": "^1.97.0"
+    "bullmq": "^1.96.0"
   },
   "devDependencies": {
     "jest": "^29.7.0",
