@@ -19,9 +19,9 @@
     "express-rate-limit": "^6.10.0",
     "helmet": "^7.0.0",
     "pino": "^8.17.0",
-    "pino-http": "^8.5.0"
-  }
-  ,
+    "pino-http": "^8.5.0",
+    "he": "^1.2.0"
+  },
   "devDependencies": {
     "jest": "^29.7.0",
     "supertest": "^6.3.4"
