@@ -173,3 +173,21 @@ Tips:
 - Use the resource allowlist to keep series cardinality stable and alerts predictable.
 - Start with wider “for” durations (e.g., 10–30m) to suppress brief spikes.
 
+## Contributing
+
+Issues: Use the structured issue templates (Bug report / Feature request) for clarity.
+Branches: Prefer short, scope-prefixed names (e.g. `feat/metrics-histogram`, `fix/email-queue-null`, `docs/security`).
+Commit Style: Imperative, scoped prefix where useful (e.g. `feat: add booking duration histogram`). Avoid bundling unrelated changes.
+Pull Requests: The PR template guides required sections; ensure tests pass (CI matrix) and CodeQL shows no new alerts before requesting review.
+Testing: Run `npm test` (or target specific files) locally; add focused tests for new endpoints, metrics, or persistence behaviors.
+Performance: For larger additions, include a brief note on expected load impact or metric cardinality.
+
+## Security
+
+Policy: See `SECURITY.md` for reporting process and supported versions.
+Secrets: Never commit `.env` or raw credentials; use environment variables and ensure Stripe/webhook keys stay local.
+Dependencies: Automated weekly updates via Dependabot (npm + GitHub Actions). Review PRs for breaking changes.
+Scanning: CodeQL runs on every PR and push to `main`; treat new alerts as blockers.
+Headers: `helmet` is enabled; validate additional hardening (e.g., stricter CSP) before production launch.
+Webhooks: Verify signatures (`STRIPE_WEBHOOK_SECRET`) and enforce replay protection; avoid echoing raw event data back to clients.
+
