@@ -1,0 +1,101 @@
+{
+  "title": "Bookings & Cancellations Overview",
+  "uid": "bookings-overview",
+  "time": { "from": "now-24h", "to": "now" },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Confirmed Bookings (Total)",
+      "datasource": "Prometheus",
+      "targets": [ { "expr": "melody_bookings_confirmed_total" } ],
+      "id": 1
+    },
+    {
+      "type": "timeseries",
+      "title": "Confirmed Bookings per Resource",
+      "datasource": "Prometheus",
+      "targets": [ { "expr": "melody_bookings_confirmed{resource_id!=''}" } ],
+      "id": 2
+    },
+    {
+      "type": "timeseries",
+      "title": "Late Cancellations per Resource",
+      "datasource": "Prometheus",
+      "targets": [ { "expr": "melody_bookings_cancelled_late{resource_id!=''}" } ],
+      "id": 3
+    },
+    {
+      "type": "stat",
+      "title": "Late Cancellations (Total)",
+      "datasource": "Prometheus",
+      "targets": [ { "expr": "melody_bookings_cancelled_late_total" } ],
+      "id": 4
+    },
+    {
+      "type": "timeseries",
+      "title": "Resource Share % (Confirmed)",
+      "datasource": "Prometheus",
+      "targets": [ { "expr": "melody_bookings_confirmed{resource_id!=''} / sum(melody_bookings_confirmed)" } ],
+      "id": 5
+    }
+    ,{
+      "type": "timeseries",
+      "title": "Utilization % per Resource",
+      "datasource": "Prometheus",
+      "targets": [ { "expr": "melody_bookings_utilization_percent{resource_id!=''}" } ],
+      "id": 6
+    }
+    ,{
+      "type": "stat",
+      "title": "Top Utilization Resource",
+      "datasource": "Prometheus",
+      "targets": [ { "expr": "topk(1, melody_bookings_utilization_percent)" } ],
+      "id": 7
+    }
+    ,{
+      "type": "timeseries",
+      "title": "Booking Duration P90 (5m rate)",
+      "datasource": "Prometheus",
+      "targets": [ { "expr": "histogram_quantile(0.9, sum by (le)(rate(melody_booking_duration_minutes_bucket[5m])))" } ],
+      "id": 8
+    }
+    ,{
+      "type": "stat",
+      "title": "Avg Booking Duration (24h)",
+      "datasource": "Prometheus",
+      "targets": [ { "expr": "rate(melody_booking_duration_minutes_sum[24h]) / rate(melody_booking_duration_minutes_count[24h])" } ],
+      "id": 9
+    }
+    ,{
+      "type": "stat",
+      "title": "Reschedule Lead Time Avg (hrs)",
+      "datasource": "Prometheus",
+      "targets": [ { "expr": "melody_reschedule_lead_time_hours_avg" } ],
+      "id": 10
+    }
+    ,{
+      "type": "stat",
+      "title": "Reschedule Lead Time Median (hrs)",
+      "datasource": "Prometheus",
+      "targets": [ { "expr": "melody_reschedule_lead_time_hours_median" } ],
+      "id": 11
+    }
+    ,{
+      "type": "timeseries",
+      "title": "Reschedules Completed (Cumulative)",
+      "datasource": "Prometheus",
+      "targets": [ { "expr": "melody_reschedule_completed_total" } ],
+      "id": 12
+    }
+    ,{
+      "type": "stat",
+      "title": "Reschedule Ratio (7d)",
+      "datasource": "Prometheus",
+      "targets": [ { "expr": "increase(melody_reschedule_completed_total[7d]) / increase(melody_bookings_confirmed_total[7d])" } ],
+      "id": 13
+    }
+  ],
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "30s"
+}
