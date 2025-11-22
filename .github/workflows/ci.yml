@@ -29,26 +29,14 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
-      - name: Install dependencies (conditional path)
+      - name: Install dependencies (root only)
         run: |
           set -e
-          if [ -d "design/backend/node-express-stripe" ]; then
-            echo "Using nested project directory"
-            cd design/backend/node-express-stripe
-            npm install --no-audit --no-fund
-          else
-            echo "Nested directory not found; using repo root"
-            npm install --no-audit --no-fund
-          fi
-      - name: Run tests (conditional path)
+          npm install --no-audit --no-fund
+      - name: Run tests (root)
         run: |
           set -e
-          if [ -d "design/backend/node-express-stripe" ]; then
-            cd design/backend/node-express-stripe
-            node run-tests.js
-          else
-            node run-tests.js || echo "run-tests.js missing in root; no tests executed" && exit 0
-          fi
+          npm test
       - name: Upload project (excluding node_modules) on failure
         if: failure()
         uses: actions/upload-artifact@v4

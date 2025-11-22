@@ -1,0 +1,70 @@
+{
+  "users": {
+    "verifyflow@example.com": {
+      "email": "verifyflow@example.com",
+      "firstName": "Parent",
+      "verified": true,
+      "createdAt": 1763640619776
+    },
+    "rate1@example.com": {
+      "email": "rate1@example.com",
+      "firstName": "Parent",
+      "verified": false,
+      "createdAt": 1763641006095
+    },
+    "rate2@example.com": {
+      "email": "rate2@example.com",
+      "firstName": "Parent",
+      "verified": false,
+      "createdAt": 1763641006110
+    },
+    "rate3@example.com": {
+      "email": "rate3@example.com",
+      "firstName": "Parent",
+      "verified": false,
+      "createdAt": 1763641006118
+    },
+    "rate4@example.com": {
+      "email": "rate4@example.com",
+      "firstName": "Parent",
+      "verified": false,
+      "createdAt": 1763641006126
+    },
+    "rate5@example.com": {
+      "email": "rate5@example.com",
+      "firstName": "Parent",
+      "verified": false,
+      "createdAt": 1763641006133
+    }
+  },
+  "customers": {
+    "setupintent@example.com": "cus_test_lq35tsws",
+    "subsuccess@example.com": "cus_test_hv7rf6f1"
+  },
+  "audit": [
+    {
+      "ts": 1763640619844,
+      "actor": "webhook",
+      "action": "invoice.payment_failed",
+      "meta": {
+        "id": "in_failed_999"
+      }
+    },
+    {
+      "ts": 1763640619859,
+      "actor": "webhook",
+      "action": "subscription.created",
+      "meta": {
+        "id": "sub_test_abc"
+      }
+    },
+    {
+      "ts": 1763640619866,
+      "actor": "webhook",
+      "action": "subscription.updated",
+      "meta": {
+        "id": "sub_test_abc"
+      }
+    }
+  ]
+}
