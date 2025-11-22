@@ -36,7 +36,6 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
-          cache-dependency-path: design/backend/node-express-stripe/package-lock.json
       - name: Install dependencies
         run: npm install --no-audit --no-fund
       - name: Run tests
