@@ -22,8 +22,15 @@ Setup (developer):
 1. Install dependencies:
    npm install
 2. Create a `.env` file in this folder with:
-   STRIPE_SECRET_KEY=sk_test_...
-   STRIPE_WEBHOOK_SECRET=whsec_...
+  STRIPE_SECRET_KEY=sk_test_...
+  # Single secret (legacy) OR multi-secret rotation list (new):
+  # STRIPE_WEBHOOK_SECRET=whsec_...(deprecated if using STRIPE_WEBHOOK_SECRETS)
+  STRIPE_WEBHOOK_SECRETS=whsec_active,whsec_previous
+  # Optional timestamp tolerance override (seconds; default 300):
+  STRIPE_SIG_TOLERANCE_SEC=300
+  # Replay window precedence (seconds first): STRIPE_REPLAY_WINDOW_SEC > WEBHOOK_REPLAY_WINDOW_MS > default 24h
+  STRIPE_REPLAY_WINDOW_SEC=86400
+  # WEBHOOK_REPLAY_WINDOW_MS=1000 (legacy example; ignored if above seconds var set)
    PORT=4242
 3. Run server locally:
    node server.js
@@ -189,5 +196,64 @@ Secrets: Never commit `.env` or raw credentials; use environment variables and e
 Dependencies: Automated weekly updates via Dependabot (npm + GitHub Actions). Review PRs for breaking changes.
 Scanning: CodeQL runs on every PR and push to `main`; treat new alerts as blockers.
 Headers: `helmet` is enabled; validate additional hardening (e.g., stricter CSP) before production launch.
-Webhooks: Verify signatures (`STRIPE_WEBHOOK_SECRET`) and enforce replay protection; avoid echoing raw event data back to clients.
+Webhooks: Verify signatures (`STRIPE_WEBHOOK_SECRET` legacy or `STRIPE_WEBHOOK_SECRETS` for rotation) and enforce replay protection; avoid echoing raw event data back to clients.
+Replay Window & Error Metrics:
+- Replay protection window is configurable; set `STRIPE_REPLAY_WINDOW_SEC` (seconds) for modern config. Falls back to `WEBHOOK_REPLAY_WINDOW_MS` (legacy) if seconds var not present.
+- Metrics expose configured window: `melody_webhook_replay_window_ms`.
+- Structured error codes returned as JSON: `{ error, detail }` (e.g. `signature_invalid`, `signature_stale`, `signature_malformed`).
+- Labeled error counter: `melody_webhook_error_total{code="signature_invalid"}` etc. Codes emitted even if zero for stable series.
+
+## Webhook Hardening & Rotation
+
+To support key rotation and stricter replay protection the webhook verifier now accepts multiple signing secrets and enforces a timestamp tolerance.
+
+Environment Variables:
+
+- `STRIPE_WEBHOOK_SECRETS`: Comma-separated list of signing secrets. Order matters; the first is treated as the active secret. Example: `STRIPE_WEBHOOK_SECRETS=whsec_new,whsec_old`.
+- `STRIPE_WEBHOOK_SECRET`: Legacy single-secret variable. If both are present, `STRIPE_WEBHOOK_SECRETS` takes precedence.
+- `STRIPE_SIG_TOLERANCE_SEC`: (Optional) Max allowed difference between Stripe event timestamp and server time in seconds. Default: `300`. Reduce (e.g. `120`) only if clock skew is tightly controlled.
+
+Rotation Procedure:
+1. Add the new secret to the front of `STRIPE_WEBHOOK_SECRETS` list while keeping the previous one: `STRIPE_WEBHOOK_SECRETS=whsec_new,whsec_current`.
+2. Deploy and observe metric `melody_webhook_signature_multisecret_match_total` increasing (indicates matches on older keys during overlap window).
+3. After Stripe dashboard shows zero recent events signed with the old secret for a safe horizon (e.g. 24h), remove the old secret from the list.
+4. Optionally set (or restore) a tighter `STRIPE_SIG_TOLERANCE_SEC` if temporarily loosened during rotation.
+
+Replay Protection:
+- Incoming events with timestamps outside the tolerance increment `melody_webhook_signature_stale_total` and are rejected (400).
+- Repeated delivery attempts (same payload hash within the recent replay window) increment `melody_webhook_signature_replay_blocked_total`.
+
+Metrics (Counters):
+- `melody_webhook_signature_valid_total` – Successful signature verifications (any secret).
+- `melody_webhook_signature_invalid_total` – Failed verification due to mismatched HMAC.
+- `melody_webhook_signature_stale_total` – Rejected because timestamp out of tolerance window.
+- `melody_webhook_signature_replay_blocked_total` – Rejected potential replay within short-lived window.
+- `melody_webhook_signature_multisecret_match_total` – Valid matches using a non-primary (rotated) secret.
+- `melody_webhook_error_total{code="..."}` – Structured error occurrences by code (missing, malformed, invalid, stale, etc.).
+
+Alert Examples:
+- Rotation overlap lingering >24h: `increase(melody_webhook_signature_multisecret_match_total[24h]) > 0` (investigate why old secret still active).
+- Spike in invalid signatures (>10 in 5m): `increase(melody_webhook_signature_invalid_total[5m]) > 10`.
+- Replay attack suspicion: `increase(melody_webhook_signature_replay_blocked_total[5m]) > 5`.
+- Tolerance tuning indicator (too strict if frequent stale): `increase(melody_webhook_signature_stale_total[1h]) > 0`.
+
+Migration Notes:
+- If you previously used `STRIPE_WEBHOOK_SECRET`, you can introduce `STRIPE_WEBHOOK_SECRETS` with both old and new secrets; no code change required beyond env update.
+- Remove the obsolete `.snap` metrics snapshot test artifact (already handled) to avoid failures when metrics headers grow.
+- Keep clocks synchronized (NTP) to safely narrow `STRIPE_SIG_TOLERANCE_SEC`.
+
+## Anomaly Detection Endpoints
+
+Detailed parameter and response documentation for utilization, seasonal residual, persistence (CUSUM), and severity aggregation endpoints is maintained in `ANOMALY-ENDPOINTS.md`.
+Quick Reference:
+- `/api/admin/resources/utilization-anomalies` – point z-score anomalies.
+- `/api/admin/resources/utilization-seasonal-anomalies` – Holt–Winters residual anomalies.
+- `/api/admin/resources/utilization-persistence-anomalies` – sustained shifts (CUSUM).
+- `/api/admin/resources/anomaly-severity` – severity tiers + recommended actions.
+
+See the separate doc for CI behavior (t vs z), residual delta thresholds, and recommended PromQL alert expressions.
+
+## Environment Reference
+
+An example `.env.example` is included enumerating recommended variables, rotation guidance, and precedence notes. Copy it to `.env` and adjust secrets locally. NEVER commit real production credentials.
 

@@ -1,6 +1,6 @@
 {
   "name": "mamp-backend-examples",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "private": true,
   "engines": {
     "node": ">=18 <21"
@@ -19,7 +19,9 @@
     "express-rate-limit": "^6.10.0",
     "helmet": "^7.0.0",
     "pino": "^8.17.0",
-    "pino-http": "^8.5.0"
+    "pino-http": "^8.5.0",
+    "ws": "^8.16.0",
+    "bullmq": "^1.96.0"
   }
   ,
   "devDependencies": {
@@ -27,6 +29,7 @@
     "supertest": "^6.3.4"
   },
   "jest": {
-    "testEnvironment": "node"
+    "testEnvironment": "node",
+    "setupFiles": ["<rootDir>/tests/setup/env.js"]
   }
 }
