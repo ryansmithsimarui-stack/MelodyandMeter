@@ -417,20 +417,10 @@ function sanitizePatch(obj){
 }
 function sanitizeStatus(s){
   if(typeof s !== 'string') return 'confirmed';
-  const allowed = new Set(['confirmed','cancelled','pending','rescheduled']);
+  const allowed = new Set(['confirmed','cancelled','pending','rescheduled','reschedule_pending']);
   if(allowed.has(s)) return s;
   // Prevent prototype pollution strings
   if(s === '__proto__' || s === 'prototype' || s === 'constructor') return 'confirmed';
   return 'confirmed';
 }
 
-// --- Security helpers ---
-function sanitizePatch(obj){
-  if(!obj || typeof obj !== 'object') return {};
-  const out = {};
-  for(const [k,v] of Object.entries(obj)){
-    if(k === '__proto__' || k === 'prototype' || k === 'constructor') continue;
-    out[k] = v;
-  }
-  return out;
-}
