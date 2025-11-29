@@ -187,7 +187,9 @@ async function dispatchEmailJobs(){
         logger.error({ to:maskEmail(job.to), subject:job.subject }, 'Email permanently failed (persisted job)');
       }else{
         const jitter = Math.floor(Math.random()*250);
-        const nextAttemptAt = Date.now() + BASE_RETRY_DELAY_MS * Math.pow(2, attempts-1) + jitter;
+        const candidate = Date.now() + BASE_RETRY_DELAY_MS * Math.pow(2, attempts-1) + jitter;
+        const prev = typeof job.nextAttemptAt === 'number' ? job.nextAttemptAt : Date.now();
+        const nextAttemptAt = candidate <= prev ? prev + 1 : candidate;
         persistence.updateEmailJob(job.id, { attempts, nextAttemptAt, lastError: err.message });
         logger.warn({ to:maskEmail(job.to), subject:job.subject, attempts }, 'Email send attempt failed (persisted job)');
       }

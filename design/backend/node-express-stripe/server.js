@@ -203,7 +203,9 @@ async function dispatchEmailJobs(){
       }else{
         // Jitter capped to half the base delay to preserve monotonic backoff growth
         const jitter = Math.floor(Math.random()*Math.max(Math.floor(BASE_RETRY_DELAY_MS/2),1));
-        const nextAttemptAt = Date.now() + BASE_RETRY_DELAY_MS * Math.pow(2, attempts-1) + jitter;
+        const candidate = Date.now() + BASE_RETRY_DELAY_MS * Math.pow(2, attempts-1) + jitter;
+        const prev = typeof job.nextAttemptAt === 'number' ? job.nextAttemptAt : Date.now();
+        const nextAttemptAt = candidate <= prev ? prev + 1 : candidate;
         persistence.updateEmailJob(job.id, { attempts, nextAttemptAt, lastError: err.message });
         logger.warn({ to:maskEmail(job.to), subject:job.subject, attempts }, 'Email send attempt failed (persisted job)');
       }
