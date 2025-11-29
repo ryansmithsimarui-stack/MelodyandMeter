@@ -5,7 +5,6 @@ const cors = require('cors');
 const helmet = require('helmet');
 const pino = require('pino');
 const pinoHttp = require('pino-http');
-const he = require('he');
 const stripeSecret = process.env.STRIPE_SECRET_KEY;
 const stripe = require('stripe')(stripeSecret || 'sk_test_missing');
 const app = express();
@@ -39,7 +38,14 @@ const httpLogger = pinoHttp({
 app.use(httpLogger);
 app.use(cors({ origin: 'http://localhost:8000' }));
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
-app.use(bodyParser.json({ limit: '200kb' }));
+// Conditional body parsing: raw for Stripe webhook (needed for signature), JSON elsewhere
+app.use((req,res,next)=>{
+  if(req.path === '/api/webhooks/stripe'){
+    // Accept any content type for raw body to support tests sending Buffer without explicit application/json header
+    return bodyParser.raw({ type: () => true })(req,res,next);
+  }
+  return bodyParser.json({ limit: '200kb' })(req,res,next);
+});
 
 // Fail fast if critical Stripe secrets missing (in non-dev environments)
 if(process.env.NODE_ENV === 'production'){
@@ -74,7 +80,8 @@ function isValidPaymentMethod(id){ return !id || (typeof id==='string' && /^pm_[
 // --- Rate limiters ---
 const registerLimiter = rateLimit({ windowMs: 60*60*1000, max: 5, standardHeaders:true, legacyHeaders:false, message:{ error:'too_many_registration_attempts' } });
 const trialFollowLimiter = rateLimit({ windowMs: 60*60*1000, max: 10, standardHeaders:true, legacyHeaders:false, message:{ error:'too_many_followup_emails' } });
-const publicPostLimiter = rateLimit({ windowMs: 60*1000, max: parseInt(process.env.PUBLIC_RATE_LIMIT_MAX||'120',10), standardHeaders:true, legacyHeaders:false, message:{ error:'rate_limited' } });
+// Public POST limiter for lightweight endpoints
+const publicPostLimiter = rateLimit({ windowMs: 60*1000, max: 60, standardHeaders:true, legacyHeaders:false, message:{ error:'rate_limited' } });
 
 // Test-only helper route to reset rate limits
 if(process.env.JEST_WORKER_ID){
@@ -116,6 +123,11 @@ function createTransport(){
   return { sendMail: async (opts)=>{ console.log('[DEV EMAIL]', opts.subject, '->', opts.to); } };
 }
 const mailer = createTransport();
+// Queue spike (Redis/BullMQ optional)
+const queueSpike = require('./queue');
+if(process.env.USE_REDIS_QUEUE === 'true'){
+  try{ queueSpike.initEmailQueue(logger); }catch(e){ logger.error({ err:e.message }, 'Queue init failed'); }
+}
 
 // --- Embedded critical email templates (fallback) ---
 const embeddedTemplates = {
@@ -172,7 +184,11 @@ function queueEmailPersisted({ to, subject, template, htmlBody, textBody }){
       textLen = textBody.length;
     }
   }
-  persistence.addEmailJob({ to, subject, template, htmlBody: htmlBody || '', textBody: textBody || '', maxAttempts: MAX_EMAIL_ATTEMPTS });
+  const jobRecord = persistence.addEmailJob({ to, subject, template, htmlBody: htmlBody || '', textBody: textBody || '', maxAttempts: MAX_EMAIL_ATTEMPTS });
+  // Attempt Redis enqueue if enabled
+  if(queueSpike.isEnabled && queueSpike.isEnabled()){
+    queueSpike.enqueueEmailJobPersisted(jobRecord, logger);
+  }
   logger.info({ to:maskEmail(to), subject, htmlLen, textLen, template }, 'Email job queued');
 }
 
@@ -195,7 +211,8 @@ async function dispatchEmailJobs(){
         persistence.updateEmailJob(job.id, { status:'permanent_failure', attempts, lastError: err.message });
         logger.error({ to:maskEmail(job.to), subject:job.subject }, 'Email permanently failed (persisted job)');
       }else{
-        const jitter = Math.floor(Math.random()*250);
+        // Jitter capped to half the base delay to preserve monotonic backoff growth
+        const jitter = Math.floor(Math.random()*Math.max(Math.floor(BASE_RETRY_DELAY_MS/2),1));
         const candidate = Date.now() + BASE_RETRY_DELAY_MS * Math.pow(2, attempts-1) + jitter;
         const prev = typeof job.nextAttemptAt === 'number' ? job.nextAttemptAt : Date.now();
         const nextAttemptAt = candidate <= prev ? prev + 1 : candidate;
@@ -205,8 +222,13 @@ async function dispatchEmailJobs(){
     }
   }
 }
-if(process.env.NODE_ENV !== 'test'){
-  setInterval(dispatchEmailJobs, 1000);
+// Avoid interval leak when running under Jest; only start in non-test and when not explicitly disabled
+if(process.env.NODE_ENV !== 'test' && !process.env.JEST_WORKER_ID){
+  if(queueSpike.isEnabled && queueSpike.isEnabled()){
+    logger.info('Redis-backed email queue active; disabling in-process dispatcher');
+  }else{
+    setInterval(dispatchEmailJobs, 1000).unref();
+  }
 }
 // Test-only manual dispatch route
 if(process.env.JEST_WORKER_ID){
@@ -338,30 +360,100 @@ app.post('/api/billing/subscriptions', asyncHandler(async (req, res) => {
   res.json(subscription);
 }));
 
-// Webhook endpoint
-app.post('/api/webhooks/stripe', bodyParser.raw({type:'application/json'}), async (req, res) => {
-  const sig = req.headers['stripe-signature'];
-  let event;
-  try{
-    if(process.env.NODE_ENV === 'test' && process.env.STRIPE_SIGNATURE_TEST_MODE === 'true'){
-      // Test-only bypass for signature complexity: use parsed object if already JSON-parsed.
-      if(req.body instanceof Buffer){
-        try{ event = JSON.parse(req.body.toString('utf8')); }catch(parseErr){ throw parseErr; }
-      } else {
-        event = req.body; // body-parser.json ran earlier
-      }
-    } else {
-      event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+// --- Stripe Webhook Security Hardening ---
+// Supports multiple secrets rotation, timestamp tolerance, replay guard & metrics.
+const webhookSecurityMetrics = { valid:0, invalid:0, stale:0, replayBlocked:0, multiSecretMatch:0 };
+// Structured error code metrics (stable label set)
+const webhookErrorCodeMetrics = {
+  signature_missing:0,
+  signature_malformed:0,
+  signature_timestamp_invalid:0,
+  signature_stale:0,
+  secret_missing:0,
+  signature_invalid:0,
+  raw_body_missing:0,
+  webhook_error:0
+};
+function mapWebhookError(message){
+  switch(message){
+    case 'Missing stripe-signature header': return 'signature_missing';
+    case 'Malformed stripe-signature header': return 'signature_malformed';
+    case 'Invalid timestamp': return 'signature_timestamp_invalid';
+    case 'Timestamp outside tolerance': return 'signature_stale';
+    case 'No webhook secret configured': return 'secret_missing';
+    case 'Invalid signature': return 'signature_invalid';
+    case 'Raw body not available': return 'raw_body_missing';
+    default: return 'webhook_error';
+  }
+}
+function getWebhookSecrets(){
+  const multi = process.env.STRIPE_WEBHOOK_SECRETS;
+  if(multi && multi.trim()) return multi.split(',').map(s=>s.trim()).filter(Boolean);
+  const single = process.env.STRIPE_WEBHOOK_SECRET;
+  return single && single.trim() ? [single.trim()] : [];
+}
+function verifyStripeSignature({ header, payload }){
+  if(!header) throw new Error('Missing stripe-signature header');
+  const parts = header.split(',').reduce((acc,kv)=>{ const [k,v]=kv.split('='); if(k&&v) acc[k]=v; return acc; },{});
+  const tsStr = parts.t;
+  const sigHex = parts.v1;
+  if(!tsStr || !sigHex) throw new Error('Malformed stripe-signature header');
+  if(!/^[0-9]+$/.test(tsStr)) throw new Error('Invalid timestamp');
+  const ts = parseInt(tsStr,10);
+  const nowSec = Math.floor(Date.now()/1000);
+  const toleranceSec = parseInt(process.env.STRIPE_SIG_TOLERANCE_SEC||'300',10);
+  if(Math.abs(nowSec - ts) > toleranceSec){ webhookSecurityMetrics.stale++; throw new Error('Timestamp outside tolerance'); }
+  const secrets = getWebhookSecrets();
+  if(secrets.length === 0) throw new Error('No webhook secret configured');
+  const signedPayload = `${ts}.${payload}`;
+  const crypto = require('crypto');
+  for(let i=0;i<secrets.length;i++){
+    const candidate = crypto.createHmac('sha256', secrets[i]).update(signedPayload).digest('hex');
+    if(candidate.length === sigHex.length){
+      try{
+        if(crypto.timingSafeEqual(Buffer.from(candidate,'hex'), Buffer.from(sigHex,'hex'))){
+          if(i>0) webhookSecurityMetrics.multiSecretMatch++;
+          webhookSecurityMetrics.valid++;
+          return { matchedSecretIndex: i };
+        }
+      }catch(e){ /* length mismatch handled above */ }
     }
-  }catch(err){ 
-    logger.warn({ err:err.message }, 'Webhook signature verification failed'); 
-    // Escape error message to prevent XSS
-    return res.status(400).send(`Webhook Error: ${he.encode(err.message)}`); 
+  }
+  webhookSecurityMetrics.invalid++;
+  throw new Error('Invalid signature');
+}
+// Webhook endpoint (hardened)
+app.post('/api/webhooks/stripe', async (req, res) => {
+  const sigHeader = req.headers['stripe-signature'];
+  let event; let payload;
+  try {
+    if(!(req.body instanceof Buffer)) throw new Error('Raw body not available');
+    payload = req.body.toString('utf8');
+    verifyStripeSignature({ header: sigHeader, payload });
+    event = JSON.parse(payload);
+  } catch(err){
+    logger.warn({ err:err.message }, 'Webhook signature verification failed');
+    const code = mapWebhookError(err.message);
+    if(Object.prototype.hasOwnProperty.call(webhookErrorCodeMetrics, code)){
+      webhookErrorCodeMetrics[code]++;
+    }else{
+      webhookErrorCodeMetrics.webhook_error++;
+    }
+    return res.status(400).json({ error: code, detail: err.message });
   }
 
-  // Replay protection using configurable window
-  const replayWindowMs = persistence.getReplayWindowMs ? persistence.getReplayWindowMs() : (24*60*60*1000);
+  // Replay protection using configurable window (event.id uniqueness)
+  const replayWindowMs = (function(){
+    // Env precedence: STRIPE_REPLAY_WINDOW_SEC (seconds) > WEBHOOK_REPLAY_WINDOW_MS (legacy ms) > persistence helper > default 24h
+    const sec = process.env.STRIPE_REPLAY_WINDOW_SEC;
+    if(sec && /^[0-9]+$/.test(sec)) return parseInt(sec,10)*1000;
+    const legacyMs = process.env.WEBHOOK_REPLAY_WINDOW_MS;
+    if(legacyMs && /^[0-9]+$/.test(legacyMs)) return parseInt(legacyMs,10);
+    if(persistence.getReplayWindowMs) return persistence.getReplayWindowMs();
+    return 24*60*60*1000; // 24h default
+  })();
   if(persistence.hasRecentWebhookEvent(event.id, replayWindowMs)){
+    webhookSecurityMetrics.replayBlocked++;
     logger.info({ eventId:event.id, type:event.type }, 'Duplicate webhook event ignored');
     return res.json({ received:true, replay_ignored:true });
   }
@@ -481,6 +573,34 @@ app.get('/api/admin/email-queue', requireAdminKey, adminLimiter, (req,res)=>{
     pending: recent.filter(j=>j.status==='pending').map(j=>({ to:maskEmail(j.to), subject:j.subject, attempts:j.attempts, nextAttemptInMs: Math.max(j.nextAttemptAt - Date.now(),0) }))
   });
 });
+// Queue metrics (Redis) endpoint
+app.get('/api/admin/email-queue-metrics', requireAdminKey, adminLimiter, asyncHandler(async (req,res)=>{
+  const redisMetrics = await queueSpike.collectQueueMetrics();
+  addAudit({ actor:req.adminKeyId, action:'get_email_queue_metrics', meta:{ enabled: redisMetrics.enabled } });
+  res.json({ redis: redisMetrics });
+}));
+// DLQ list endpoint
+app.get('/api/admin/email-dlq', requireAdminKey, adminLimiter, asyncHandler(async (req,res)=>{
+  const limit = parseInt(req.query.limit||'50',10);
+  const dlq = await queueSpike.listDlqJobs(limit);
+  addAudit({ actor:req.adminKeyId, action:'list_email_dlq', meta:{ jobs: dlq.jobs ? dlq.jobs.length : 0 } });
+  res.json(dlq);
+}));
+// DLQ requeue endpoint
+app.post('/api/admin/email-dlq/requeue/:id', requireAdminKey, adminLimiter, asyncHandler(async (req,res)=>{
+  const id = req.params.id;
+  const result = await queueSpike.requeueDlqJob(id, logger);
+  addAudit({ actor:req.adminKeyId, action:'requeue_email_dlq', meta:{ id, requeued: result.requeued } });
+  if(!result.requeued) return res.status(404).json(result);
+  res.json(result);
+}));
+// DLQ purge endpoint
+app.delete('/api/admin/email-dlq', requireAdminKey, adminLimiter, asyncHandler(async (req,res)=>{
+  const result = await queueSpike.purgeDlq(logger);
+  addAudit({ actor:req.adminKeyId, action:'purge_email_dlq', meta:{ removed: result.removed||0 } });
+  if(!result.purged) return res.status(400).json(result);
+  res.json(result);
+}));
 app.get('/api/admin/audit', requireAdminKey, adminLimiter, (req,res)=>{
   const limit = parseInt(req.query.limit||'50',10);
   const entries = persistence.getAudit(limit).map(e=>({ ts:e.ts, actor:e.actor, action:e.action, meta:e.meta||{} }));
@@ -518,8 +638,81 @@ function getResourceCapacityMinutes(){
 app.get('/api/admin/resources', requireAdminKey, adminLimiter, (req,res)=>{
   const allowed = getAllowedResourceIds();
   const enforced = allowed.length > 0;
-  addAudit({ actor:req.adminKeyId, action:'get_resources', meta:{ count: allowed.length, enforced } });
-  res.json({ enforced, allowedResourceIds: allowed });
+  const capacityMap = getResourceCapacityMinutes();
+  // Merge dynamic catalog capacities (override env mapping)
+  const catalog = (typeof persistence.listResources === 'function') ? persistence.listResources() : [];
+  // Sort by displayOrder (ascending nulls last) then id
+  catalog.sort((a,b)=>{
+    const ao = (typeof a.displayOrder==='number')?a.displayOrder:Infinity;
+    const bo = (typeof b.displayOrder==='number')?b.displayOrder:Infinity;
+    if(ao !== bo) return ao - bo;
+    return a.id.localeCompare(b.id);
+  });
+  for(const r of catalog){
+    if(r.active && typeof r.capacityMinutes === 'number' && r.capacityMinutes > 0){
+      capacityMap[r.id] = r.capacityMinutes;
+    }
+  }
+  const capacityConfigured = Object.keys(capacityMap).length > 0;
+  addAudit({ actor:req.adminKeyId, action:'get_resources', meta:{ count: allowed.length, enforced, capacityConfigured, catalogSize: catalog.length } });
+  const activeResources = catalog.filter(r=>r.active);
+  const inactiveResources = catalog.filter(r=>!r.active);
+  res.json({ enforced, allowedResourceIds: allowed, capacityMinutes: capacityMap, capacityConfigured, resources: catalog, activeResources, inactiveResources });
+});
+
+// --- Resource Catalog CRUD ---
+app.post('/api/admin/resources', requireAdminKey, adminLimiter, (req,res)=>{
+  const { id, name, capacityMinutes, active, displayOrder } = req.body || {};
+  const creation = persistence.createResource({ id, name, capacityMinutes, active, displayOrder });
+  if(creation.error){
+    const status = creation.error === 'resource_exists' ? 409 : 400;
+    return res.status(status).json(creation);
+  }
+  addAudit({ actor:req.adminKeyId, action:'create_resource', meta:{ id: creation.resource.id } });
+  res.status(201).json({ created:true, resource: creation.resource });
+});
+app.patch('/api/admin/resources/:id', requireAdminKey, adminLimiter, (req,res)=>{
+  const id = req.params.id;
+  const patch = {};
+  const expectedVersion = typeof req.body.version === 'number' ? req.body.version : undefined;
+  ['name','capacityMinutes','active','displayOrder'].forEach(k=>{ if(Object.prototype.hasOwnProperty.call(req.body,k)) patch[k] = req.body[k]; });
+  if(expectedVersion === undefined){ return res.status(400).json({ error:'version_required' }); }
+  const updated = persistence.updateResource(id, patch, expectedVersion);
+  if(updated.error){
+    const status = updated.error === 'version_conflict' ? 409 : 404;
+    return res.status(status).json(updated);
+  }
+  addAudit({ actor:req.adminKeyId, action:'update_resource', meta:{ id, previousVersion: expectedVersion, newVersion: updated.resource.version } });
+  try{ if(typeof module.exports._broadcastResourceEvent === 'function'){ module.exports._broadcastResourceEvent('resource_updated', updated.resource); } }catch(e){ /* ignore */ }
+  res.json({ updated:true, resource: updated.resource });
+});
+app.delete('/api/admin/resources/:id', requireAdminKey, adminLimiter, (req,res)=>{
+  const id = req.params.id;
+  const expectedVersion = typeof req.body.version === 'number' ? req.body.version : undefined;
+  if(expectedVersion === undefined){ return res.status(400).json({ error:'version_required' }); }
+  const deactivated = persistence.deactivateResource(id, expectedVersion);
+  if(deactivated.error){
+    const status = deactivated.error === 'version_conflict' ? 409 : 404;
+    return res.status(status).json(deactivated);
+  }
+  addAudit({ actor:req.adminKeyId, action:'deactivate_resource', meta:{ id, deletedAt: deactivated.resource.deletedAt, previousVersion: expectedVersion, newVersion: deactivated.resource.version } });
+  try{ if(typeof module.exports._broadcastResourceEvent === 'function'){ module.exports._broadcastResourceEvent('resource_deactivated', deactivated.resource); } }catch(e){ /* ignore */ }
+  res.json({ deactivated:true, resource: deactivated.resource });
+});
+
+// Bulk import resources
+app.post('/api/admin/resources/bulk-import', requireAdminKey, adminLimiter, (req,res)=>{
+  const { resources } = req.body || {};
+  const result = persistence.bulkCreateResources(resources);
+  if(result.error){ return res.status(400).json(result); }
+  addAudit({ actor:req.adminKeyId, action:'bulk_import_resources', meta:{ created: result.created.length, errors: result.errors.length } });
+  res.status(201).json({ imported:true, created: result.created, errors: result.errors });
+});
+// Export full catalog
+app.get('/api/admin/resources/export', requireAdminKey, adminLimiter, (req,res)=>{
+  const catalog = (typeof persistence.listResources==='function') ? persistence.listResources() : [];
+  addAudit({ actor:req.adminKeyId, action:'export_resources', meta:{ count: catalog.length } });
+  res.json({ resources: catalog });
 });
 
 // --- Metrics endpoint (Prometheus-style) ---
@@ -536,7 +729,14 @@ app.get('/api/admin/metrics', requireAdminKey, adminLimiter, (req,res)=>{
   const webhookCounters = persistence.getWebhookCounters();
   const webhookEventTotal = persistence.getWebhookEventTotal();
   const analyticsTotal = persistence.getAnalyticsEventTotal ? persistence.getAnalyticsEventTotal() : 0;
-  const replayWindowMs = persistence.getReplayWindowMs ? persistence.getReplayWindowMs() : (24*60*60*1000);
+  const replayWindowMs = (function(){
+    const sec = process.env.STRIPE_REPLAY_WINDOW_SEC;
+    if(sec && /^[0-9]+$/.test(sec)) return parseInt(sec,10)*1000;
+    const legacyMs = process.env.WEBHOOK_REPLAY_WINDOW_MS;
+    if(legacyMs && /^[0-9]+$/.test(legacyMs)) return parseInt(legacyMs,10);
+    if(persistence.getReplayWindowMs) return persistence.getReplayWindowMs();
+    return 24*60*60*1000;
+  })();
   lines.push('# HELP melody_email_queue_depth Current number of queued email jobs');
   lines.push('# TYPE melody_email_queue_depth gauge');
   lines.push(`melody_email_queue_depth ${queueStats.depth}`);
@@ -564,6 +764,31 @@ app.get('/api/admin/metrics', requireAdminKey, adminLimiter, (req,res)=>{
   lines.push('# HELP melody_webhook_unhandled_event_total Count of unhandled webhook events processed');
   lines.push('# TYPE melody_webhook_unhandled_event_total counter');
   lines.push(`melody_webhook_unhandled_event_total ${webhookCounters.unhandled_event}`);
+  // Security hardening counters (signature verification)
+  if(typeof webhookSecurityMetrics !== 'undefined'){
+    lines.push('# HELP melody_webhook_signature_valid_total Count of webhooks with valid signature');
+    lines.push('# TYPE melody_webhook_signature_valid_total counter');
+    lines.push(`melody_webhook_signature_valid_total ${webhookSecurityMetrics.valid}`);
+    lines.push('# HELP melody_webhook_signature_invalid_total Count of webhooks rejected due to invalid signature');
+    lines.push('# TYPE melody_webhook_signature_invalid_total counter');
+    lines.push(`melody_webhook_signature_invalid_total ${webhookSecurityMetrics.invalid}`);
+    lines.push('# HELP melody_webhook_signature_stale_total Count of webhooks rejected due to stale timestamp');
+    lines.push('# TYPE melody_webhook_signature_stale_total counter');
+    lines.push(`melody_webhook_signature_stale_total ${webhookSecurityMetrics.stale}`);
+    lines.push('# HELP melody_webhook_replay_blocked_total Count of duplicate webhook events blocked');
+    lines.push('# TYPE melody_webhook_replay_blocked_total counter');
+    lines.push(`melody_webhook_replay_blocked_total ${webhookSecurityMetrics.replayBlocked}`);
+    lines.push('# HELP melody_webhook_signature_multisecret_match_total Count of webhooks matched via rotated (non-primary) secret');
+    lines.push('# TYPE melody_webhook_signature_multisecret_match_total counter');
+    lines.push(`melody_webhook_signature_multisecret_match_total ${webhookSecurityMetrics.multiSecretMatch}`);
+    // Error code labeled counter samples
+    lines.push('# HELP melody_webhook_error_total Count of webhook verification errors by structured code');
+    lines.push('# TYPE melody_webhook_error_total counter');
+    for(const [code,val] of Object.entries(webhookErrorCodeMetrics)){
+      const safe = code.replace(/"/g,'');
+      lines.push(`melody_webhook_error_total{code="${safe}"} ${val}`);
+    }
+  }
   lines.push('# HELP melody_webhook_replay_window_ms Configured webhook replay protection window in milliseconds');
   lines.push('# TYPE melody_webhook_replay_window_ms gauge');
   lines.push(`melody_webhook_replay_window_ms ${replayWindowMs}`);
@@ -625,6 +850,13 @@ app.get('/api/admin/metrics', requireAdminKey, adminLimiter, (req,res)=>{
   }
   // Capacity utilization percent (0-1 ratio) per resource if capacity configured
   const capacityMap = getResourceCapacityMinutes();
+  // Overlay dynamic catalog capacities
+  const catalogForMetrics = (typeof persistence.listResources === 'function') ? persistence.listResources() : [];
+  for(const r of catalogForMetrics){
+    if(r.active && typeof r.capacityMinutes === 'number' && r.capacityMinutes > 0){
+      capacityMap[r.id] = r.capacityMinutes;
+    }
+  }
   lines.push('# HELP melody_bookings_utilization_percent Ratio of booked minutes to configured capacity per resource (0-1)');
   lines.push('# TYPE melody_bookings_utilization_percent gauge');
   const utilizationIds = isAllowlistEnforced() ? allowedIds : Object.keys(minutesPerResource);
@@ -699,8 +931,162 @@ app.get('/api/admin/metrics', requireAdminKey, adminLimiter, (req,res)=>{
   lines.push('# TYPE melody_reschedule_completed_total gauge');
   lines.push(`melody_reschedule_completed_total ${leadStats.completedCount}`);
   addAudit({ actor:req.adminKeyId, action:'get_metrics', meta:{ queueDepth: queueStats.depth, webhookEvents: webhookEventTotal } });
+  // Record utilization snapshot for history/forecast (non-blocking)
+  try{ if(typeof persistence.recordResourceUtilizationSnapshot === 'function'){ const snap = persistence.recordResourceUtilizationSnapshot('metrics'); if(snap && typeof module.exports._broadcastSnapshot === 'function'){ module.exports._broadcastSnapshot(snap); } } }catch(e){ /* ignore */ }
   res.setHeader('Content-Type','text/plain; charset=utf-8');
   res.send(lines.join('\n') + '\n');
+});
+
+// --- Resource Audit Endpoint (full catalog with metadata) ---
+app.get('/api/admin/resources/audit', requireAdminKey, adminLimiter, (req,res)=>{
+  const catalog = typeof persistence.listResources==='function' ? persistence.listResources() : [];
+  addAudit({ actor:req.adminKeyId, action:'audit_resources', meta:{ count: catalog.length } });
+  res.json({ resources: catalog });
+});
+
+// --- Utilization History Endpoint ---
+app.get('/api/admin/resources/utilization-history', requireAdminKey, adminLimiter, (req,res)=>{
+  const limit = parseInt(req.query.limit||'50',10);
+  const snapshots = typeof persistence.listResourceUtilizationHistory==='function' ? persistence.listResourceUtilizationHistory(limit) : [];
+  addAudit({ actor:req.adminKeyId, action:'get_resource_utilization_history', meta:{ returned: snapshots.length } });
+  res.json({ snapshots });
+});
+
+// --- Utilization Anomalies Endpoint ---
+app.get('/api/admin/resources/utilization-anomalies', requireAdminKey, adminLimiter, (req,res)=>{
+  const windowSize = parseInt(req.query.window||'50',10);
+  const threshold = parseFloat(req.query.threshold||'2');
+  const varianceMode = (req.query.variance === 'sample') ? 'sample' : 'population';
+  const result = typeof persistence.computeUtilizationAnomalies==='function' ? persistence.computeUtilizationAnomalies(windowSize, threshold, varianceMode) : { anomalies: [] };
+  addAudit({ actor:req.adminKeyId, action:'get_resource_utilization_anomalies', meta:{ anomalies: result.anomalies.length, threshold: result.threshold, varianceMode: result.varianceMode } });
+  res.json(result);
+});
+
+// --- Seasonal Residual Utilization Anomalies Endpoint ---
+app.get('/api/admin/resources/utilization-seasonal-anomalies', requireAdminKey, adminLimiter, (req,res)=>{
+  const windowSize = parseInt(req.query.window||'60',10);
+  const threshold = parseFloat(req.query.threshold||'2');
+  const seasonLength = parseInt(req.query.seasonLength||'6',10);
+  const deltaThreshold = req.query.deltaThreshold !== undefined ? parseFloat(req.query.deltaThreshold) : undefined;
+  const alpha = req.query.alpha !== undefined ? parseFloat(req.query.alpha) : undefined;
+  const beta = req.query.beta !== undefined ? parseFloat(req.query.beta) : undefined;
+  const gamma = req.query.gamma !== undefined ? parseFloat(req.query.gamma) : undefined;
+  const adapt = req.query.adapt;
+  const adaptFlag = adapt === 'true';
+  const varianceMode = (req.query.variance === 'sample') ? 'sample' : 'population';
+  const result = typeof persistence.computeSeasonalResidualAnomalies==='function' ? persistence.computeSeasonalResidualAnomalies(windowSize, threshold, seasonLength, deltaThreshold, alpha, beta, gamma, adaptFlag, varianceMode) : { anomalies: [] };
+  addAudit({ actor:req.adminKeyId, action:'get_resource_utilization_seasonal_anomalies', meta:{ anomalies: result.anomalies.length, threshold: result.threshold, seasonLength: result.seasonLength, residualDeltaThreshold: result.residualDeltaThreshold, alpha: result.alpha, beta: result.beta, gamma: result.gamma, adaptive: result.adaptive, varianceMode: result.varianceMode } });
+  res.json(result);
+});
+
+// --- Capacity Forecast Endpoint ---
+app.get('/api/admin/resources/capacity-forecast', requireAdminKey, adminLimiter, (req,res)=>{
+  const heuristic = typeof persistence.computeCapacityForecast==='function' ? persistence.computeCapacityForecast() : { forecast: [] };
+  const advanced = typeof persistence.computeAdvancedCapacityForecast==='function' ? persistence.computeAdvancedCapacityForecast(0.6) : { forecast: [] };
+  const holtWinters = typeof persistence.computeHoltWintersCapacityForecast==='function' ? persistence.computeHoltWintersCapacityForecast(0.5,0.3,0.2,6) : { forecast: [] };
+  addAudit({ actor:req.adminKeyId, action:'get_capacity_forecast', meta:{ resources: heuristic.forecast.length } });
+  res.json({ heuristic, advanced, holtWinters });
+});
+
+// --- Anomaly Severity Classification Endpoint (v0.7.8) ---
+// Aggregates utilization and seasonal residual anomalies and assigns severity tiers & recommended actions.
+// Severity Rules (utilization zScore):
+// 0: |z| < 1.8 (normal)
+// 1: 1.8 <= |z| < 2.5 (informational)
+// 2: 2.5 <= |z| < 3.5 (watch)
+// 3: 3.5 <= |z| <= 5 (action)
+// 4: |z| > 5 (critical)
+// Seasonal residual also considers residualDelta:
+// residualDelta tiers: <0.05 normal; 0.05-0.07 info; 0.07-0.10 watch; 0.10-0.15 action; >0.15 critical.
+// Final seasonal severity = max(zScore tier, residualDelta tier).
+function classifyZ(absZ){
+  if(absZ < 1.8) return 0;
+  if(absZ < 2.5) return 1;
+  if(absZ < 3.5) return 2;
+  if(absZ <= 5) return 3;
+  return 4;
+}
+function classifyResidualDelta(d){
+  if(d < 0.05) return 0;
+  if(d < 0.07) return 1;
+  if(d < 0.10) return 2;
+  if(d <= 0.15) return 3;
+  return 4;
+}
+const severityLabels = { 0:'normal',1:'informational',2:'watch',3:'action',4:'critical' };
+const recommendedActions = {
+  0:'No action; continue monitoring.',
+  1:'Log & observe; verify if trend persists.',
+  2:'Review capacity trends; prepare mitigation.',
+  3:'Initiate capacity adjustment or stakeholder notification.',
+  4:'Escalate immediately; trigger alerting & contingency plan.'
+};
+app.get('/api/admin/resources/anomaly-severity', requireAdminKey, adminLimiter, (req,res)=>{
+  const windowSize = parseInt(req.query.window||'60',10);
+  const threshold = parseFloat(req.query.threshold||'2');
+  const seasonLength = parseInt(req.query.seasonLength||'6',10);
+  const varianceMode = (req.query.variance === 'sample') ? 'sample' : 'population';
+  const util = typeof persistence.computeUtilizationAnomalies==='function' ? persistence.computeUtilizationAnomalies(windowSize, threshold, varianceMode) : { anomalies: [] };
+  const seasonal = typeof persistence.computeSeasonalResidualAnomalies==='function' ? persistence.computeSeasonalResidualAnomalies(windowSize, threshold, seasonLength, undefined, undefined, undefined, undefined, false, varianceMode) : { anomalies: [] };
+  const utilizationSeverity = util.anomalies.map(a=>{
+    const absZ = Math.abs(a.zScore||0);
+    const sev = classifyZ(absZ);
+    return {
+      id: a.id,
+      type: 'utilization',
+      samples: a.samples,
+      zScore: a.zScore,
+      anomaly: a.anomaly,
+      severityLevel: sev,
+      severityLabel: severityLabels[sev],
+      recommendedAction: recommendedActions[sev],
+      lastUtilizationPercent: a.lastUtilizationPercent,
+      meanUtilizationPercent: a.meanUtilizationPercent,
+      ciDistribution: a.ciDistribution,
+      ciCritical: a.ciCritical,
+      meanLower: a.meanLower,
+      meanUpper: a.meanUpper
+    };
+  });
+  const seasonalSeverity = seasonal.anomalies.map(a=>{
+    const absZ = Math.abs(a.zScore||0);
+    const zSev = classifyZ(absZ);
+    const deltaSev = typeof a.residualDelta === 'number' ? classifyResidualDelta(a.residualDelta) : 0;
+    const sev = Math.max(zSev, deltaSev);
+    return {
+      id: a.id,
+      type: 'seasonal_residual',
+      samples: a.samples,
+      zScore: a.zScore,
+      residualDelta: a.residualDelta !== undefined ? a.residualDelta : (a.lastResidual !== undefined && a.meanResidual !== undefined ? (a.lastResidual - a.meanResidual) : null),
+      anomaly: a.anomaly,
+      severityLevel: sev,
+      severityLabel: severityLabels[sev],
+      recommendedAction: recommendedActions[sev],
+      lastUtilizationPercent: a.lastUtilizationPercent,
+      expectedUtilizationPercent: a.expectedUtilizationPercent,
+      projectedNextUtilizationPercent: a.projectedNextUtilizationPercent,
+      residualDeltaThreshold: a.residualDeltaThreshold,
+      ciDistribution: a.ciDistribution,
+      ciCritical: a.ciCritical,
+      expectedLower: a.expectedLower,
+      expectedUpper: a.expectedUpper
+    };
+  });
+  addAudit({ actor:req.adminKeyId, action:'get_anomaly_severity', meta:{ utilization: utilizationSeverity.length, seasonal: seasonalSeverity.length } });
+  res.json({ generatedAt: Date.now(), windowSize, threshold, seasonLength, varianceMode, utilizationSeverity, seasonalSeverity, severityLegend: Object.entries(severityLabels).map(([k,v])=>({ level: parseInt(k,10), label: v, action: recommendedActions[k] })) });
+});
+
+// --- Persistence (Multi-Point) Utilization Anomalies Endpoint (v0.7.9) ---
+// Detect sustained shifts using CUSUM and windowed mean comparison.
+app.get('/api/admin/resources/utilization-persistence-anomalies', requireAdminKey, adminLimiter, (req,res)=>{
+  const windowSize = parseInt(req.query.window||'80',10);
+  const k = parseFloat(req.query.k||'0.25');
+  const h = parseFloat(req.query.h||'5');
+  const varianceMode = (req.query.variance === 'sample') ? 'sample' : 'population';
+  const result = typeof persistence.computePersistenceUtilizationAnomalies==='function' ? persistence.computePersistenceUtilizationAnomalies(windowSize, k, h, varianceMode) : { anomalies: [] };
+  addAudit({ actor:req.adminKeyId, action:'get_persistence_utilization_anomalies', meta:{ anomalies: result.anomalies.length, windowSize: result.windowSize, k: result.k, h: result.h, varianceMode: result.varianceMode } });
+  res.json(result);
 });
 
 // --- Health endpoint ---
@@ -721,9 +1107,36 @@ app.use((err, req, res, next)=>{
 });
 
 const PORT = process.env.PORT || 4242;
-// Avoid starting listener when running under Jest (JEST_WORKER_ID set)
-if(!process.env.JEST_WORKER_ID){
-  app.listen(PORT, ()=>logger.info({ port:PORT }, 'Server started'));
+let serverInstance = null;
+if(!process.env.JEST_WORKER_ID || process.env.ENABLE_WS_TESTS === 'true'){
+  serverInstance = app.listen(PORT, ()=>logger.info({ port:PORT }, 'Server started'));
+}
+let wss = null;
+function initWebSocket(){
+  if(!serverInstance) return;
+  try{
+    const WebSocket = require('ws');
+    wss = new WebSocket.Server({ server: serverInstance, path: '/ws/resources' });
+    wss.on('connection', ws => {
+      ws.send(JSON.stringify({ type:'ws_connected', ts: Date.now() }));
+    });
+    logger.info('WebSocket server listening /ws/resources');
+  }catch(e){ logger.error({ err:e.message }, 'WebSocket init failed'); }
+}
+if(!process.env.JEST_WORKER_ID || process.env.ENABLE_WS_TESTS === 'true'){
+  initWebSocket();
+}
+function broadcastResourceEvent(type, resource){
+  if(!wss) return;
+  for(const client of wss.clients){
+    try{ if(client.readyState === 1){ client.send(JSON.stringify({ type, ts: Date.now(), resource })); } }catch(e){ /* ignore */ }
+  }
+}
+function broadcastSnapshot(snapshot){
+  if(!wss) return;
+  for(const client of wss.clients){
+    try{ if(client.readyState === 1){ client.send(JSON.stringify({ type:'utilization_snapshot', ts: snapshot.ts, origin: snapshot.origin, perResource: snapshot.perResource })); } }catch(e){ /* ignore */ }
+  }
 }
 
 // --- Validation Stub Endpoints (enums & analytics events) ---
@@ -774,3 +1187,9 @@ app.post('/api/practice/add-entry', publicPostLimiter, (req,res)=>{
 
 
 module.exports = app;
+module.exports._broadcastResourceEvent = broadcastResourceEvent;
+module.exports._broadcastSnapshot = broadcastSnapshot;
+module.exports._shutdown = function(){
+  try{ if(wss){ wss.close(); wss = null; } }catch(e){ /* ignore */ }
+  try{ if(serverInstance){ serverInstance.close(); serverInstance = null; } }catch(e){ /* ignore */ }
+};
