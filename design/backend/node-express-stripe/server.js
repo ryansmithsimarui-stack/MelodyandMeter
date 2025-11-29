@@ -80,6 +80,8 @@ function isValidPaymentMethod(id){ return !id || (typeof id==='string' && /^pm_[
 // --- Rate limiters ---
 const registerLimiter = rateLimit({ windowMs: 60*60*1000, max: 5, standardHeaders:true, legacyHeaders:false, message:{ error:'too_many_registration_attempts' } });
 const trialFollowLimiter = rateLimit({ windowMs: 60*60*1000, max: 10, standardHeaders:true, legacyHeaders:false, message:{ error:'too_many_followup_emails' } });
+// Public POST limiter for lightweight endpoints
+const publicPostLimiter = rateLimit({ windowMs: 60*1000, max: 60, standardHeaders:true, legacyHeaders:false, message:{ error:'rate_limited' } });
 
 // Test-only helper route to reset rate limits
 if(process.env.JEST_WORKER_ID){
@@ -303,7 +305,7 @@ app.post('/api/auth/register', registerLimiter, asyncHandler(async (req,res)=>{
   res.json({ status:'pending_verification' });
 }));
 
-app.post('/api/auth/verify', asyncHandler(async (req,res)=>{
+app.post('/api/auth/verify', publicPostLimiter, asyncHandler(async (req,res)=>{
   const { email } = req.body; if(!email) return res.status(400).json({error:'email_required'});
   if(rejectIfInvalidEmail(res,email)) return;
   const user = persistence.getUser(email);
@@ -313,7 +315,7 @@ app.post('/api/auth/verify', asyncHandler(async (req,res)=>{
 }));
 
 // Create SetupIntent for saving a card (client will use client_secret to complete)
-app.post('/api/payments/setup-intent', asyncHandler(async (req, res) => {
+app.post('/api/payments/setup-intent', publicPostLimiter, asyncHandler(async (req, res) => {
   const { email } = req.body;
   if(!email) return res.status(400).json({error:'email_required'});
   if(rejectIfInvalidEmail(res,email)) return;
@@ -1141,14 +1143,14 @@ function broadcastSnapshot(snapshot){
 // These are lightweight and will be expanded later.
 const validation = require('./validation-stubs');
 
-app.post('/api/booking/validate-transition', (req,res)=>{
+app.post('/api/booking/validate-transition', publicPostLimiter, (req,res)=>{
   const { current, next } = req.body || {};
   if(!current || !next) return res.status(400).json({ error:'current_and_next_required' });
   const valid = validation.validateBookingStatusTransition(current, next);
   res.json({ valid });
 });
 
-app.post('/api/analytics/events', (req,res)=>{
+app.post('/api/analytics/events', publicPostLimiter, (req,res)=>{
   const { events } = req.body || {};
   const { accepted, errors } = validation.batchValidateAnalyticsEvents(events);
   if(errors.length){
@@ -1167,14 +1169,14 @@ app.use(require('./bookingInstrumentationRoutes'));
 // Booking domain CRUD (create/reschedule/cancel) moved to bookingRoutes.js
 app.use(require('./bookingRoutes'));
 
-app.post('/api/lesson/complete', (req,res)=>{
+app.post('/api/lesson/complete', publicPostLimiter, (req,res)=>{
   const { booking_id, teacher_id, duration_min, start_at, end_at } = req.body || {};
   if(!booking_id || !teacher_id || typeof duration_min !== 'number') return res.status(400).json({ error:'booking_id_teacher_id_duration_min_required' });
   require('./analytics').trackEvent('lesson_completed', { booking_id, teacher_id, duration_min, ts: Date.now(), ...(start_at?{start_at}:{}) , ...(end_at?{end_at}:{}) });
   res.json({ completed:true });
 });
 
-app.post('/api/practice/add-entry', (req,res)=>{
+app.post('/api/practice/add-entry', publicPostLimiter, (req,res)=>{
   const { booking_id, student_id, tasks_count, entry_type } = req.body || {};
   if(!booking_id || !student_id || typeof tasks_count !== 'number' || !entry_type) return res.status(400).json({ error:'booking_id_student_id_tasks_count_entry_type_required' });
   require('./analytics').trackEvent('practice_entry_added', { booking_id, student_id, tasks_count, entry_type, ts: Date.now() });

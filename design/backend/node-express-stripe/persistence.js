@@ -68,7 +68,25 @@ function init(){ load(); }
 
 // Users
 function getUser(email){ load(); return state.users[email] || null; }
-function createUser(email, userObj){ load(); state.users[email] = userObj; commit(); return userObj; }
+function sanitizePatch(obj){
+  if(!obj || typeof obj !== 'object') return {};
+  const dangerous = ['__proto__','prototype','constructor'];
+  const out = {};
+  for(const [k,v] of Object.entries(obj)){
+    if(dangerous.includes(k)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+function sanitizeKey(key){
+  if(typeof key !== 'string') return '';
+  return key.replace(/__proto__|prototype|constructor/gi,'').trim();
+}
+function sanitizeStatus(status){
+  const allowed = new Set(['pending','confirmed','cancelled','reschedule_pending','rescheduled']);
+  return allowed.has(status) ? status : 'pending';
+}
+function createUser(email, userObj){ load(); const safeEmail = sanitizeKey(email); state.users[safeEmail] = sanitizePatch(userObj); commit(); return state.users[safeEmail]; }
 function verifyUser(email){ load(); if(state.users[email]){ state.users[email].verified = true; commit(); return true; } return false; }
 
 // Customers
@@ -120,7 +138,7 @@ function updateEmailJob(id, patch){
   const idx = state.emailJobs.findIndex(j=>j.id===id);
   if(idx === -1) return null;
   const existing = state.emailJobs[idx];
-  const updated = { ...existing, ...patch, updatedAt: Date.now() };
+  const updated = { ...existing, ...sanitizePatch(patch), updatedAt: Date.now() };
   if(patch.status === 'permanent_failure' && !updated.movedToDlqAt){
     updated.movedToDlqAt = Date.now();
   }
@@ -216,14 +234,14 @@ function updateBooking(id, patch){
   load();
   const existing = state.bookings[id];
   if(!existing) return null;
-  const updated = { ...existing, ...patch, updated_at: Date.now() };
+  const updated = { ...existing, ...sanitizePatch(patch), updated_at: Date.now() };
   state.bookings[id] = updated; commit(); return updated;
 }
 function recordBookingStatus(id, newStatus){
   load();
   const existing = state.bookings[id];
   if(!existing) return null;
-  existing.status = newStatus;
+  existing.status = sanitizeStatus(newStatus);
   existing.history.push({ ts: Date.now(), status: newStatus });
   existing.updated_at = Date.now();
   commit();
