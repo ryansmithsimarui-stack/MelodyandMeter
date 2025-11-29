@@ -66,8 +66,21 @@ function init(){ load(); }
 
 // Users
 function getUser(email){ load(); return state.users[email] || null; }
-function createUser(email, userObj){ load(); state.users[email] = userObj; commit(); return userObj; }
+function createUser(email, userObj){
+  load();
+  const safeEmail = sanitizeKey(email);
+  if(!safeEmail) return null;
+  const safeUser = sanitizePatch(userObj);
+  state.users[safeEmail] = safeUser;
+  commit();
+  return safeUser;
+}
 function verifyUser(email){ load(); if(state.users[email]){ state.users[email].verified = true; commit(); return true; } return false; }
+function sanitizeKey(k){
+  if(typeof k !== 'string') return null;
+  if(k === '__proto__' || k === 'prototype' || k === 'constructor') return null;
+  return k;
+}
 
 // Customers
 function getCustomerId(email){ load(); return state.customers[email] || null; }
@@ -210,8 +223,9 @@ function recordBookingStatus(id, newStatus){
   load();
   const existing = state.bookings[id];
   if(!existing) return null;
-  existing.status = newStatus;
-  existing.history.push({ ts: Date.now(), status: newStatus });
+  const safeStatus = sanitizeStatus(newStatus);
+  existing.status = safeStatus;
+  existing.history.push({ ts: Date.now(), status: safeStatus });
   existing.updated_at = Date.now();
   commit();
   return existing;
@@ -390,6 +404,25 @@ module.exports = {
   ,getLateCancellationTotal
   ,getRescheduleLeadTimeStats
 };
+
+// --- Security helpers ---
+function sanitizePatch(obj){
+  if(!obj || typeof obj !== 'object') return {};
+  const out = {};
+  for(const [k,v] of Object.entries(obj)){
+    if(k === '__proto__' || k === 'prototype' || k === 'constructor') continue;
+    out[k] = v;
+  }
+  return out;
+}
+function sanitizeStatus(s){
+  if(typeof s !== 'string') return 'confirmed';
+  const allowed = new Set(['confirmed','cancelled','pending','rescheduled']);
+  if(allowed.has(s)) return s;
+  // Prevent prototype pollution strings
+  if(s === '__proto__' || s === 'prototype' || s === 'constructor') return 'confirmed';
+  return 'confirmed';
+}
 
 // --- Security helpers ---
 function sanitizePatch(obj){

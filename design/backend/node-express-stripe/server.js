@@ -58,7 +58,15 @@ if(process.env.NODE_ENV === 'production'){
 
 // --- Simple validation helpers ---
 function isValidEmail(email){
-  return typeof email === 'string' && email.length <= 254 && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email);
+  if(typeof email !== 'string') return false;
+  if(email.length > 254) return false;
+  // Reject multiple @ or any quoted local-part that includes @ (dependabot advisory)
+  if(email.split('@').length !== 2) return false;
+  if(/".*@.*"@/.test(email)) return false;
+  // Disallow quotes in local-part to avoid parser ambiguities
+  if(/^".*"@/.test(email)) return false;
+  // Basic RFC-like pattern (no spaces, exactly one @, dot in domain)
+  return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email);
 }
 function cleanName(name){
   if(!name || typeof name !== 'string') return '';
