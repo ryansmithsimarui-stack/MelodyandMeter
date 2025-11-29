@@ -114,7 +114,8 @@ function updateEmailJob(id, patch){
   const idx = state.emailJobs.findIndex(j=>j.id===id);
   if(idx === -1) return null;
   const existing = state.emailJobs[idx];
-  const updated = { ...existing, ...patch, updatedAt: Date.now() };
+  const sanitized = sanitizePatch(patch);
+  const updated = { ...existing, ...sanitized, updatedAt: Date.now() };
   state.emailJobs[idx] = updated;
   commit();
   return updated;
@@ -201,7 +202,8 @@ function updateBooking(id, patch){
   load();
   const existing = state.bookings[id];
   if(!existing) return null;
-  const updated = { ...existing, ...patch, updated_at: Date.now() };
+  const sanitized = sanitizePatch(patch);
+  const updated = { ...existing, ...sanitized, updated_at: Date.now() };
   state.bookings[id] = updated; commit(); return updated;
 }
 function recordBookingStatus(id, newStatus){
@@ -388,3 +390,14 @@ module.exports = {
   ,getLateCancellationTotal
   ,getRescheduleLeadTimeStats
 };
+
+// --- Security helpers ---
+function sanitizePatch(obj){
+  if(!obj || typeof obj !== 'object') return {};
+  const out = {};
+  for(const [k,v] of Object.entries(obj)){
+    if(k === '__proto__' || k === 'prototype' || k === 'constructor') continue;
+    out[k] = v;
+  }
+  return out;
+}
